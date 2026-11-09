@@ -1,0 +1,20 @@
+# Run only on the isolated experiment node; delete the Job to stop contention.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: granite-cpu-contention
+spec:
+  activeDeadlineSeconds: 300
+  backoffLimit: 0
+  template:
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: REPLACE_WITH_GPU_NODE
+      restartPolicy: Never
+      containers:
+        - name: busy
+          image: busybox:1.37.0
+          command: [sh, -c, "for i in 1 2 3 4; do (while :; do :; done) & done; wait"]
+          resources:
+            requests: {cpu: "1", memory: 16Mi}
+            limits: {cpu: "4", memory: 32Mi}

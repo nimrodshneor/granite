@@ -1,0 +1,11 @@
+# Merge into an existing Prometheus configuration. Adjust workload addresses.
+scrape_configs:
+  - job_name: granite
+    static_configs:
+      - targets: ["127.0.0.1:9091"]
+  - job_name: vllm
+    static_configs:
+      - targets: ["127.0.0.1:8000"]
+  - job_name: gpu
+    static_configs:
+      - targets: ["127.0.0.1:9400"]

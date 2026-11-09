@@ -1,0 +1,4 @@
+.git
+bin
+bpf/*.o
+bpf/vmlinux.h

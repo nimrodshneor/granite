@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: granite-controller
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: granite-discovery
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: granite-discovery
+subjects:
+  - kind: ServiceAccount
+    name: granite-controller
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: granite-discovery
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: granite-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: granite-controller}
+  template:
+    metadata:
+      labels: {app: granite-controller}
+    spec:
+      serviceAccountName: granite-controller
+      containers:
+        - name: controller
+          image: granite:dev
+          args: ["controller"]
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 128Mi}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}

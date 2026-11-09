@@ -1,0 +1,48 @@
+# Single-node experiment template: replace node hostname, TARGET_PID and URLs.
+# Build scheduler.o on Linux and install it at /opt/granite/scheduler.o first.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: granite-agent
+spec:
+  selector:
+    matchLabels: {app: granite-agent}
+  template:
+    metadata:
+      labels: {app: granite-agent}
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: REPLACE_WITH_GPU_NODE
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 15
+      containers:
+        - name: agent
+          image: granite:dev
+          args:
+            - agent
+            - --pid=$(TARGET_PID)
+            - --bpf-object=/opt/granite/scheduler.o
+            - --vllm-url=$(VLLM_METRICS_URL)
+            - --gpu-url=$(GPU_METRICS_URL)
+          env:
+            - {name: TARGET_PID, value: "0"} # Host engine TGID, not container PID.
+            - {name: VLLM_METRICS_URL, value: "http://127.0.0.1:8000/metrics"}
+            - {name: GPU_METRICS_URL, value: "http://127.0.0.1:9400/metrics"}
+          securityContext:
+            privileged: true
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+          resources:
+            requests: {cpu: 100m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          volumeMounts:
+            - {name: bpf-object, mountPath: /opt/granite/scheduler.o, readOnly: true}
+            - {name: cgroup, mountPath: /sys/fs/cgroup, readOnly: true}
+      volumes:
+        - name: bpf-object
+          hostPath: {path: /opt/granite/scheduler.o, type: File}
+        - name: cgroup
+          hostPath: {path: /sys/fs/cgroup, type: Directory}
