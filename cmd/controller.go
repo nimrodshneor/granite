@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
 	"os"
 	"time"
 
@@ -12,7 +12,7 @@ import (
 
 var controllerCmd = &cobra.Command{
 	Use:   "controller",
-	Run:   newController,
+	RunE:  newController,
 	Short: "Discover labeled inference Pods; emit read-only workload inventory",
 }
 
@@ -39,9 +39,12 @@ func init() {
 
 }
 
-func newController(cmd *cobra.Command, args []string) {
+func newController(cmd *cobra.Command, args []string) error {
+	if cmd.Context().Err() != nil {
+		return nil
+	}
 	if cmdLineArgs.interval < time.Second {
-		log.Fatal("--interval must be at least 1s")
+		return fmt.Errorf("--interval must be at least 1s")
 	}
 	for {
 		workloads, err := cmdLineArgs.client.Discover(cmd.Context(),
@@ -49,19 +52,22 @@ func newController(cmd *cobra.Command, args []string) {
 			cmdLineArgs.node,
 		)
 		if err != nil {
-			log.Fatal(err)
+			if cmd.Context().Err() != nil {
+				return nil
+			}
+			return fmt.Errorf("discover workloads: %w", err)
 		}
 		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(workloads); err != nil {
-			log.Fatal(err)
+			return fmt.Errorf("write workload inventory: %w", err)
 		}
 		if cmdLineArgs.once {
-			os.Exit(0)
+			return nil
 		}
 		timer := time.NewTimer(cmdLineArgs.interval)
 		select {
 		case <-cmd.Context().Done():
 			timer.Stop()
-			os.Exit(0)
+			return nil
 		case <-timer.C:
 		}
 	}
