@@ -5,11 +5,6 @@ latency with Linux runnable delay and test whether a bounded CPU-weight change
 helps. Observation is the default. This is an experiment scaffold; no performance
 improvement has been established yet.
 
-The project follows [fwtapper](https://github.com/nimrodshn/fwtapper)'s Go layout,
-Cobra commands, Cilium eBPF loader, C programs, and Makefile/generation workflow.
-It uses current pinned dependencies rather than fwtapper's original versions.
-Netlink is unnecessary for the scheduler/cgroup control surface.
-
 ## Quick start
 
 Requires Go 1.25 or newer. The synthetic demo runs on macOS and Linux without root,
@@ -47,18 +42,32 @@ extension points, not implemented features.
 
 ## Linux node experiment
 
-Use an isolated cgroup v2 Linux 5.15+ GPU node with kernel BTF at
-`/sys/kernel/btf/vmlinux`, raw scheduler tracepoints, and permission to load BPF.
+Run the current end-to-end agent on a cgroup v2 Linux 5.15+ node with kernel BTF
+at `/sys/kernel/btf/vmlinux`, raw scheduler tracepoints, and permission to load
+BPF. For the vLLM comparison below, the node also needs GPU utilization from
+DCGM. Exclusive GPU access is not a software requirement; an otherwise quiet GPU
+just makes the performance comparison easier to interpret. vLLM supports CPU
+serving, but Granite's current policy requires a DCGM GPU utilization metric and
+cannot evaluate a CPU-only run without a metrics adapter.
+macOS can build and run the synthetic demo, but cannot run this Linux eBPF agent.
+There is no `make agent` target: `make generate` builds the BPF object, `make build`
+builds the CLI, and `./bin/granite agent` starts it.
 Install LLVM clang with a BPF backend, bpftool, and libbpf development headers
 (for example Ubuntu packages `clang llvm bpftool libbpf-dev`). Apple clang cannot
 compile this BPF program. Kernel builds lacking the required BTF fields or hooks
-will fail to load rather than silently substitute telemetry.
+will fail to load rather than silently substitute telemetry. The package command
+below is for Ubuntu; use your distribution's equivalents elsewhere. Install Go
+1.25 or newer on the Linux node as well.
 
 ```sh
-make generate  # on Linux: generates vmlinux.h and bpf/scheduler.o
+test -r /sys/kernel/btf/vmlinux
+test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+sudo apt-get update && sudo apt-get install -y clang llvm bpftool libbpf-dev
+make generate  # on Linux: generates bpf/vmlinux.h and bpf/scheduler.o
 make build
 sudo ./bin/granite agent --pid 12345 \
-  --vllm-url http://127.0.0.1:8000/metrics \
+  --object bpf/scheduler.o \
+  --app-url http://127.0.0.1:8000/metrics \
   --gpu-url http://127.0.0.1:9400/metrics
 ```
 
@@ -82,13 +91,24 @@ counters. Metric names may need an adapter for other vLLM versions.
 The GPU endpoint must expose exactly one `DCGM_FI_DEV_GPU_UTIL` gauge in percent,
 for the GPU serving this workload. A multi-GPU DCGM endpoint must be filtered
 before use. Missing or ambiguous GPU data is not evidence of headroom.
+Check the actual endpoints before starting the agent:
+
+```sh
+curl -fsS http://127.0.0.1:8000/metrics | grep -E '^vllm:(time_to_first_token_seconds|inter_token_latency_seconds|request_success)'
+curl -fsS http://127.0.0.1:9400/metrics | grep '^DCGM_FI_DEV_GPU_UTIL{'
+```
+
+The first command should show the required classic histogram buckets and completed
+request counter. The second should show exactly one GPU utilization sample; filter
+the exporter endpoint to the target GPU if it shows more than one. These endpoints
+must be reachable from the Linux node where the agent runs.
 
 Inspect JSON logs or the loopback HTTP endpoints:
 
 ```sh
-curl http://127.0.0.1:9091/status
-curl http://127.0.0.1:9091/metrics
-curl http://127.0.0.1:9091/healthz
+curl http://127.0.0.1:8081/status
+curl http://127.0.0.1:8081/metrics
+curl http://127.0.0.1:8081/healthz
 ```
 
 `/healthz` returns 503 until application and kernel telemetry are available.
@@ -98,10 +118,16 @@ per runnable wait**, not p95 or run-queue depth.
 
 ### Enable a trial
 
-Supply the exact non-root host cgroup v2 directory from `/proc/12345/cgroup`:
+Supply the exact non-root host cgroup v2 directory from `/proc/12345/cgroup`.
+Record its current weight so you can restore it after a crash:
 
 ```sh
+cat /proc/12345/cgroup
+cat /sys/fs/cgroup/REPLACE_WITH_TARGET_CGROUP/cpu.weight
 sudo ./bin/granite agent --pid 12345 \
+  --object bpf/scheduler.o \
+  --app-url http://127.0.0.1:8000/metrics \
+  --gpu-url http://127.0.0.1:9400/metrics \
   --cgroup /sys/fs/cgroup/REPLACE_WITH_TARGET_CGROUP --enforce
 ```
 
@@ -152,24 +178,56 @@ for the experiment and mounts cgroups read-only for observation. Enabling writes
 requires a writable cgroup mount and explicit `--cgroup` / `--enforce` arguments.
 The binary-only container does not build BPF objects at runtime.
 
-### Repeatable comparison
+### First real comparison
 
-Start one vLLM deployment using your chosen model and pinned engine version, expose
-its metrics, and provide DCGM telemetry for its GPU. Keep model, request prompt,
-token limit and concurrency fixed across each comparison:
+Start one vLLM workload on the Linux GPU node and expose its
+[Prometheus metrics](https://docs.vllm.ai/en/stable/usage/metrics/). Run a
+[DCGM exporter](https://docs.nvidia.com/datacenter/dcgm/latest/gpu-telemetry/dcgm-exporter.html)
+for that GPU. Identify the **host PID of the vLLM engine process**, not just its
+API server or container PID, and use that PID in the agent commands above. Keep
+model, prompt, token limit, concurrency, and vLLM version fixed in each comparison.
+Run `scripts/benchmark.py` from a client that can reach the vLLM API.
+
+1. Start the agent **without** `--enforce`. Run a warmup workload, then a baseline
+   benchmark. Confirm `/healthz` returns 200 and `granite_telemetry_valid` is 1
+   while requests are flowing. Save the JSON agent output and vLLM/DCGM metrics.
+2. Add CPU contention on the same node. If vLLM runs in Kubernetes, set the node
+   selector in `deploy/contention.yaml` and apply the five-minute Job below. Run
+   the benchmark again while the Job is active. The agent should report runnable
+   delay and may propose `apply` with `enforcement_enabled: false` if the evidence
+   gates are met.
+3. Stop the observation agent, then restart it with the exact vLLM cgroup path and
+   `--enforce` as shown above. Repeat the same workload while contention persists.
+   Confirm an `apply` decision actually changes `cpu.weight`, followed by a
+   `rollback` decision and restoration. Check the saved weight afterward. If the
+   Job's five-minute deadline expires first, restart the contention workload
+   before measuring the trial.
+
+Example benchmark commands, run from the client (adjust the URL and model):
 
 ```sh
-python3 scripts/benchmark.py --model YOUR_MODEL --requests 200 --concurrency 8 > baseline.json
-# Edit the node selector before applying the bounded five-minute contention Job.
+python3 scripts/benchmark.py --url http://GPU_NODE:8000 --model YOUR_MODEL --requests 1000 --concurrency 8 > baseline.json
+# On the Kubernetes client, after editing the node selector:
 kubectl apply -f deploy/contention.yaml
-python3 scripts/benchmark.py --model YOUR_MODEL --requests 200 --concurrency 8 > contention.json
-# Start the agent with --enforce and the target cgroup, then repeat.
-python3 scripts/benchmark.py --model YOUR_MODEL --requests 200 --concurrency 8 > trial.json
+python3 scripts/benchmark.py --url http://GPU_NODE:8000 --model YOUR_MODEL --requests 1000 --concurrency 8 > contention.json
+# Restart the agent with --enforce on the Linux node; then run:
+python3 scripts/benchmark.py --url http://GPU_NODE:8000 --model YOUR_MODEL --requests 1000 --concurrency 8 > trial.json
 kubectl delete job granite-cpu-contention
 ```
 
-Save agent logs and Prometheus data for all phases. Use sufficiently long runs to
-cover warmup, evidence accumulation, the trial, and cooldown. Repeat across prompt
+The Job example applies only when vLLM runs in Kubernetes. On another Linux
+setup, put a CPU-hungry process in a competing sibling cgroup; a process in the
+same cgroup will not test the relative `cpu.weight` change. The target cgroup
+must have CPU headroom: `cpu.weight` does not bypass a binding `cpu.max` quota.
+Make each run long enough to cover the first scrape, three 5-second evidence
+intervals, a 30-second trial, and the 60-second cooldown; increase `--requests`
+if needed, and keep the contention active throughout the trial. The default
+policy requires p95 TTFT above 500 ms or p95 inter-token latency above 50 ms,
+mean runnable delay at least 5 ms with 20 samples per interval, and GPU use below
+85%. If any gate is missing, expect `observe` and inspect the agent's `reason`
+and `error` fields before changing the workload.
+
+Save agent logs and Prometheus data for all phases. Repeat across prompt
 sizes, concurrency, and CPU pressure, randomizing baseline/trial order and allowing
 warmup before measuring. Compare TTFT p50/p95/p99, vLLM token latency and throughput,
 GPU utilization, scheduling delay, agent overhead and neighboring workload latency.

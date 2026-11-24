@@ -24,8 +24,8 @@ spec:
           args:
             - agent
             - --pid=$(TARGET_PID)
-            - --bpf-object=/opt/granite/scheduler.o
-            - --vllm-url=$(VLLM_METRICS_URL)
+            - --object=/opt/granite/scheduler.o
+            - --app-url=$(VLLM_METRICS_URL)
             - --gpu-url=$(GPU_METRICS_URL)
           env:
             - {name: TARGET_PID, value: "0"} # Host engine TGID, not container PID.
