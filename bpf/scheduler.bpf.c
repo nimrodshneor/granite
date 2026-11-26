@@ -11,14 +11,14 @@ struct {
     __uint(max_entries, 1);
     __type(key, __u32);
     __type(value, __u32);
-} target SEC("maps");
+} target SEC(".maps");
 
 struct {
     __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 16384);
     __type(key, __u32);
     __type(value, __u64);
-} runnable SEC("maps");
+} runnable SEC(".maps");
 
 struct counters { __u64 delay_ns; __u64 samples; };
 struct {
@@ -26,7 +26,7 @@ struct {
     __uint(max_entries, 1);
     __type(key, __u32);
     __type(value, struct counters);
-} stats SEC("maps");
+} stats SEC(".maps");
 
 static __always_inline int matches(struct task_struct *task) {
     __u32 zero = 0;

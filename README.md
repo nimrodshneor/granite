@@ -53,7 +53,8 @@ will fail to load rather than silently substitute telemetry.
 make generate  # on Linux: generates vmlinux.h and bpf/scheduler.o
 make build
 sudo ./bin/granite agent --pid 12345 \
-  --vllm-url http://127.0.0.1:8000/metrics \
+  --object bpf/scheduler.o \
+  --app-url http://127.0.0.1:8000/metrics \
   --gpu-url http://127.0.0.1:9400/metrics
 ```
 
@@ -74,16 +75,17 @@ missing metrics and unsupported histogram ranges suppress trials. Quantiles are
 estimated by interpolation over **interval bucket deltas**, rather than lifetime
 counters. Metric names may need an adapter for other vLLM versions.
 
-The GPU endpoint must expose exactly one `DCGM_FI_DEV_GPU_UTIL` gauge in percent,
-for the GPU serving this workload. A multi-GPU DCGM endpoint must be filtered
-before use. Missing or ambiguous GPU data is not evidence of headroom.
+The GPU endpoint must expose exactly one `DCGM_FI_DEV_GPU_UTIL_RATIO` gauge (0-1)
+or the older `DCGM_FI_DEV_GPU_UTIL` gauge (0-100 percent) for the GPU serving this
+workload. A multi-GPU DCGM endpoint must be filtered before use. Missing or
+ambiguous GPU data is not evidence of headroom.
 
 Inspect JSON logs or the loopback HTTP endpoints:
 
 ```sh
-curl http://127.0.0.1:9091/status
-curl http://127.0.0.1:9091/metrics
-curl http://127.0.0.1:9091/healthz
+curl http://127.0.0.1:8081/status
+curl http://127.0.0.1:8081/metrics
+curl http://127.0.0.1:8081/healthz
 ```
 
 `/healthz` returns 503 until application and kernel telemetry are available.
@@ -97,6 +99,9 @@ Supply the exact non-root host cgroup v2 directory from `/proc/12345/cgroup`:
 
 ```sh
 sudo ./bin/granite agent --pid 12345 \
+  --object bpf/scheduler.o \
+  --app-url http://127.0.0.1:8000/metrics \
+  --gpu-url http://127.0.0.1:9400/metrics \
   --cgroup /sys/fs/cgroup/REPLACE_WITH_TARGET_CGROUP --enforce
 ```
 
