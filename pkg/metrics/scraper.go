@@ -102,7 +102,7 @@ func quantile(h histogram, q float64) (float64, error) {
 }
 
 // Sample requires a dedicated single-workload vLLM endpoint and a GPU endpoint
-// exposing exactly one DCGM_FI_DEV_GPU_UTIL series for that workload's GPU.
+// exposing one utilization series for that workload's GPU.
 func (s *Scraper) Sample(ctx context.Context, now time.Time) (model.Observation, error) {
 	o := model.Observation{At: now}
 	client := s.Client
@@ -173,15 +173,27 @@ func (s *Scraper) Sample(ctx context.Context, now time.Time) (model.Observation,
 	if err != nil {
 		return o, err
 	}
-	f := gpu["DCGM_FI_DEV_GPU_UTIL"]
-	if f == nil || f.GetType() != dto.MetricType_GAUGE || len(f.Metric) != 1 {
-		return o, fmt.Errorf("GPU endpoint must expose exactly one DCGM_FI_DEV_GPU_UTIL gauge")
-	}
-	o.GPUUtilization = f.Metric[0].GetGauge().GetValue() / 100
-	if math.IsNaN(o.GPUUtilization) || math.IsInf(o.GPUUtilization, 0) || o.GPUUtilization < 0 || o.GPUUtilization > 1 {
-		o.GPUUtilization = 0
-		return o, fmt.Errorf("invalid GPU utilization")
+	o.GPUUtilization, err = readGPUUtilization(gpu)
+	if err != nil {
+		return o, err
 	}
 	o.Valid = true
 	return o, nil
+}
+
+func readGPUUtilization(gpu map[string]*dto.MetricFamily) (float64, error) {
+	name, scale := "DCGM_FI_DEV_GPU_UTIL_RATIO", 1.0
+	f := gpu[name]
+	if f == nil {
+		name, scale = "DCGM_FI_DEV_GPU_UTIL", 100
+		f = gpu[name]
+	}
+	if f == nil || f.GetType() != dto.MetricType_GAUGE || len(f.Metric) != 1 {
+		return 0, fmt.Errorf("GPU endpoint must expose exactly one DCGM_FI_DEV_GPU_UTIL_RATIO or DCGM_FI_DEV_GPU_UTIL gauge")
+	}
+	utilization := f.Metric[0].GetGauge().GetValue() / scale
+	if math.IsNaN(utilization) || math.IsInf(utilization, 0) || utilization < 0 || utilization > 1 {
+		return 0, fmt.Errorf("invalid GPU utilization")
+	}
+	return utilization, nil
 }

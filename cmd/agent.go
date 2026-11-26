@@ -167,7 +167,11 @@ func (a *runtimeAgent) step(ctx context.Context, now time.Time, encoder *json.En
 	if err := a.enforceDecision(decision); err != nil {
 		return err
 	}
-	r := report{Observation: observation, Decision: decision, Enforcement: a.args.enable}
+	r := report{
+		Observation: observation,
+		Decision:    decision,
+		Enforcement: a.args.enable,
+	}
 	if collectionErr != nil {
 		r.Error = collectionErr.Error()
 	}
@@ -194,14 +198,14 @@ func (a *runtimeAgent) checkIdentity() error {
 func (a *runtimeAgent) observe(ctx context.Context, now time.Time) (model.Observation, error) {
 	scrapeCtx, cancel := context.WithTimeout(ctx, min(a.args.interval, agentScrapeTimeout))
 	defer cancel()
-	o, scrapeErr := a.scraper.Sample(scrapeCtx, now)
+	observation, scrapeErr := a.scraper.Sample(scrapeCtx, now)
 	if ctx.Err() != nil {
-		return o, ctx.Err()
+		return observation, ctx.Err()
 	}
 	delay, count, kernelErr := a.scheduler.Sample()
-	o.RunnableDelaySeconds, o.Samples = delay, count
-	o.Valid = o.Valid && kernelErr == nil
-	return o, errors.Join(scrapeErr, kernelErr)
+	observation.RunnableDelaySeconds, observation.Samples = delay, count
+	observation.Valid = observation.Valid && kernelErr == nil
+	return observation, errors.Join(scrapeErr, kernelErr)
 }
 
 func (a *runtimeAgent) enforceDecision(d model.Decision) error {

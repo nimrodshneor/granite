@@ -11,6 +11,7 @@ import (
 
 func TestIntervalHistogramsAndMissingGPU(t *testing.T) {
 	count, gpu := 100, true
+	gpuName, gpuValue := "DCGM_FI_DEV_GPU_UTIL", 40.0
 	itl := "vllm:inter_token_latency_seconds"
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "# TYPE vllm:request_success_total counter\nvllm:request_success_total %d\n", count)
@@ -18,7 +19,7 @@ func TestIntervalHistogramsAndMissingGPU(t *testing.T) {
 			fmt.Fprintf(w, "# TYPE %s histogram\n%s_bucket{le=\"0.1\"} %d\n%s_bucket{le=\"1\"} %d\n%s_bucket{le=\"+Inf\"} %d\n%s_count %d\n%s_sum 1\n", name, name, count/2, name, count, name, count, name, count, name)
 		}
 		if gpu {
-			fmt.Fprintln(w, "# TYPE DCGM_FI_DEV_GPU_UTIL gauge\nDCGM_FI_DEV_GPU_UTIL 40")
+			fmt.Fprintf(w, "# TYPE %s gauge\n%s %g\n", gpuName, gpuName, gpuValue)
 		}
 	}))
 	defer server.Close()
@@ -52,5 +53,15 @@ func TestIntervalHistogramsAndMissingGPU(t *testing.T) {
 	count += 20
 	if o, err := s.Sample(context.Background(), now.Add(25*time.Second)); err != nil || !o.Valid {
 		t.Fatalf("legacy metric: %+v, %v", o, err)
+	}
+	gpuName, gpuValue = "DCGM_FI_DEV_GPU_UTIL_RATIO", .4
+	count += 20
+	if o, err := s.Sample(context.Background(), now.Add(30*time.Second)); err != nil || !o.Valid || o.GPUUtilization != .4 {
+		t.Fatalf("ratio metric: %+v, %v", o, err)
+	}
+	gpuValue = 40 // A percent value under the ratio name must be rejected.
+	count += 20
+	if o, err := s.Sample(context.Background(), now.Add(35*time.Second)); err == nil || o.Valid {
+		t.Fatalf("invalid ratio accepted: %+v, %v", o, err)
 	}
 }

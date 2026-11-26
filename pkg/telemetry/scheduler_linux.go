@@ -40,7 +40,14 @@ func Open(object string, pid uint32) (*Scheduler, error) {
 		s.Close()
 		return nil, err
 	}
-	for name, tracepoint := range map[string]string{"wakeup": "sched_wakeup", "wakeup_new": "sched_wakeup_new", "switch_task": "sched_switch", "exit_task": "sched_process_exit"} {
+	// Attach the four scheduler tracepoints to the eBPF programs.
+	// The programs are sequentially executed in the order they are attached.
+	for name, tracepoint := range map[string]string{
+		"wakeup":      "sched_wakeup",
+		"wakeup_new":  "sched_wakeup_new",
+		"switch_task": "sched_switch",
+		"exit_task":   "sched_process_exit",
+	} {
 		p := c.Programs[name]
 		if p == nil {
 			s.Close()
