@@ -1,4 +1,6 @@
 /bin/
 /bpf/vmlinux.h
 /bpf/*.o
+/experiment-results/
+__pycache__/
 *.test

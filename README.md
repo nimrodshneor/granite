@@ -32,6 +32,7 @@ rollback, and cooldown. Its improvement is synthetic and it never changes the ho
 | `pkg/discovery/` | Read-only Kubernetes Pod inventory using service-account HTTPS |
 | `deploy/` | Container/Kubernetes, contention and Prometheus examples |
 | `scripts/benchmark.py` | Concurrent streaming request benchmark using Python's standard library |
+| `scripts/paired_experiment.py` | Bounded single-node CPU contention and paired CPU-weight comparison |
 
 The node's fast loop needs no Kubernetes API calls. The discovery command is the
 controller skeleton: it discovers running labeled Pods, nodes, IPs, UIDs and
@@ -154,6 +155,43 @@ The binary-only container does not build BPF objects at runtime.
 
 ### Repeatable comparison
 
+For a single Linux GPU node with vLLM already serving requests, first start the
+agent in observation mode as shown above. Use the **current host engine PID** and
+run the paired comparison from the repository root:
+
+```sh
+python3 scripts/paired_experiment.py --pid HOST_ENGINE_PID \
+  --model Qwen/Qwen3-0.6B --dry-run
+sudo python3 scripts/paired_experiment.py --pid HOST_ENGINE_PID \
+  --model Qwen/Qwen3-0.6B --pairs 5 --requests 200 --concurrency 1
+```
+
+The script requires a local `ubuntu:latest` image (`sudo docker pull ubuntu:latest`
+if missing). It warms up vLLM, starts four CPU loops in a separate Docker cgroup,
+and alternates weight 100 and 200 within each pair. The stress container has a
+one-hour limit and must remain active through every arm; the script aborts if it
+stops, if the target PID/cgroup changes, or if `cpu.weight` changes unexpectedly.
+The original weight and stress container are restored/stopped on normal exit,
+errors, SIGINT, SIGTERM and SSH hangup. For SIGKILL or a host crash, use the generated
+`recovery.txt` in the result directory. The dry run prints the planned order and
+does not change the host. On the T4/Qwen setup used here, five pairs of 200
+requests per arm take roughly 25 minutes at 1.3 requests/second.
+
+Results go into `experiment-results/<UTC timestamp>/`: `manifest.json` records
+the order and setup, each arm has `benchmark/requests.jsonl` with per-request
+first-content latency, total duration, returned token usage, and server-side
+TTFT when vLLM provides it, plus `benchmark/summary.json` and `agent.jsonl`.
+`comparison.json` reports paired p95 changes, p99, throughput, and the median
+p95 change. A positive p95 reduction means the boosted arm was faster. Verify
+that all requests completed, stress CPU stayed high, and the original weight
+was restored. This tests the CPU-weight intervention directly; the agent should stay
+in observation mode. Its automatic apply/rollback path is a separate test. The
+client here runs on the same four-core host as the CPU contender, so its own CPU
+wait can affect client-side TTFT; use a separate load-generator host before
+claiming a service-side latency benefit. Compare server-side TTFT when available.
+
+For Kubernetes, the following manual procedure uses the contention Job:
+
 Start one vLLM deployment using your chosen model and pinned engine version, expose
 its metrics, and provide DCGM telemetry for its GPU. Keep model, request prompt,
 token limit and concurrency fixed across each comparison:
@@ -177,8 +215,8 @@ The Python script measures TTFT and content-chunk gaps; streamed chunks can cont
 multiple tokens, so chunk gaps are **not** token ITL. Use engine metrics for ITL.
 
 Run negative controls with a saturated GPU, low CPU delay, or missing GPU telemetry;
-there should be no apply decision. No Kubernetes or GPU experiment has been run as
-part of this scaffold.
+there should be no apply decision. One paired comparison is exploratory; repeat
+across independent runs and workloads before claiming a general improvement.
 
 ## Next extensions
 
