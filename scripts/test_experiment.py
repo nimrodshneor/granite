@@ -79,6 +79,12 @@ class ExperimentTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "enabled enforcement"):
                 paired_experiment.valid_agent_samples(path)
 
+    def test_server_timing_requirement_rejects_missing_metrics(self):
+        summary = {"completed": 2, "errors": [], "server_ttft_seconds": None}
+        with self.assertRaisesRegex(RuntimeError, "--enable-per-request-metrics"):
+            paired_experiment.validate_summary(summary, 2, True)
+        paired_experiment.validate_summary(summary, 2, False)
+
     def test_failed_arm_restores_weight_and_stops_stress(self):
         with tempfile.TemporaryDirectory() as directory:
             weight = Path(directory) / "cpu.weight"
@@ -91,7 +97,7 @@ class ExperimentTest(unittest.TestCase):
                                    timeout=1, warmup_requests=0, stress_workers=1,
                                    stress_shares=8192, stress_seconds=60,
                                    min_stress_cpu=100, stress_image="ubuntu:latest",
-                                   expected_weight=100, seed=1,
+                                   expected_weight=100, require_server_metrics=False, seed=1,
                                    output_dir=Path(directory) / "results", dry_run=False)
 
             def write_sample(_stop, path, _url, _interval):
@@ -132,7 +138,7 @@ class ExperimentTest(unittest.TestCase):
                                    timeout=1, warmup_requests=0, stress_workers=1,
                                    stress_shares=8192, stress_seconds=60,
                                    min_stress_cpu=100, stress_image="ubuntu:latest",
-                                   expected_weight=100, seed=1,
+                                   expected_weight=100, require_server_metrics=False, seed=1,
                                    output_dir=output_dir, dry_run=False)
 
             def write_sample(_stop, path, _url, _interval):
@@ -143,6 +149,7 @@ class ExperimentTest(unittest.TestCase):
                 arm_dir.mkdir()
                 p95 = 0.04 if weight.read_text() == "100\n" else 0.03
                 return {"ttft_seconds": {"0.95": p95, "0.99": 0.05},
+                        "server_ttft_seconds": {"0.95": p95},
                         "requests_per_second": 1.3}
 
             with patch("paired_experiment.parse_args", return_value=args), \
@@ -161,6 +168,7 @@ class ExperimentTest(unittest.TestCase):
                     paired_experiment.main()
             comparison = json.loads((output_dir / "comparison.json").read_text())
             self.assertAlmostEqual(comparison["median_p95_reduction_fraction"], 0.25)
+            self.assertAlmostEqual(comparison["median_server_p95_reduction_fraction"], 0.25)
             self.assertEqual(comparison["boost_faster_pairs"], 1)
             self.assertEqual(weight.read_text(), "100\n")
 

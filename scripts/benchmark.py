@@ -59,6 +59,8 @@ def request(args, request_id):
                        "prompt_tokens": usage.get("prompt_tokens") if usage else None,
                        "finish_reason": finish_reason,
                        "system_fingerprint": fingerprint})
+        if server_metrics:
+            result["server_metrics"] = server_metrics
         if server_metrics and isinstance(server_metrics.get("time_to_first_token_ms"), (int, float)):
             result["server_ttft_seconds"] = server_metrics["time_to_first_token_ms"] / 1000
     except Exception as exc:

@@ -164,9 +164,16 @@ def run_benchmark(args, output_dir, requests):
         raise RuntimeError("benchmark failed; inspect %s and %s" %
                            (summary_path, stderr_path))
     result = json.loads(summary_path.read_text(encoding="utf-8"))
+    validate_summary(result, requests, args.require_server_metrics)
+    return result
+
+
+def validate_summary(result, requests, require_server_metrics):
     if result["completed"] != requests or result["errors"]:
         raise RuntimeError("benchmark did not complete all requests")
-    return result
+    if require_server_metrics and not (result.get("server_ttft_seconds") or {}).get("0.95"):
+        raise RuntimeError("server-side TTFT is missing; restart vLLM with "
+                           "--enable-per-request-metrics before this experiment")
 
 
 def compare(arms, pairs):
@@ -190,9 +197,16 @@ def compare(arms, pairs):
             "boost_requests_per_second": boost["requests_per_second"],
         })
     reductions = [pair["p95_reduction_fraction"] for pair in comparisons]
+    server_reductions = [1 - pair["boost_server_p95_seconds"] / pair["control_server_p95_seconds"]
+                         for pair in comparisons if pair["control_server_p95_seconds"]
+                         and pair["boost_server_p95_seconds"]]
     return {"pairs": comparisons,
             "median_p95_reduction_fraction": statistics.median(reductions),
             "boost_faster_pairs": sum(value > 0 for value in reductions),
+            "median_server_p95_reduction_fraction": (statistics.median(server_reductions)
+                                                     if len(server_reductions) == pairs else None),
+            "server_boost_faster_pairs": (sum(value > 0 for value in server_reductions)
+                                          if len(server_reductions) == pairs else None),
             "pair_count": pairs}
 
 
@@ -216,6 +230,8 @@ def parse_args():
                         help="Minimum contender CPU percent before and after each arm")
     parser.add_argument("--stress-image", default="ubuntu:latest")
     parser.add_argument("--expected-weight", type=int, default=100)
+    parser.add_argument("--require-server-metrics", action="store_true",
+                        help="Abort during warmup if vLLM omits per-request server TTFT")
     parser.add_argument("--seed", type=int)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--dry-run", action="store_true")
@@ -252,6 +268,7 @@ def main():
                 "boost_weight": boosted, "pairs": args.pairs, "requests_per_arm": args.requests,
                 "concurrency": args.concurrency, "max_tokens": args.max_tokens,
                 "prompt": args.prompt, "seed": seed, "schedule": schedule,
+                "require_server_metrics": args.require_server_metrics,
                 "stress_container": stress_name, "stress_command": stress_command,
                 "min_stress_cpu_percent": args.min_stress_cpu,
                 "host": platform.uname()._asdict(), "python": sys.version,

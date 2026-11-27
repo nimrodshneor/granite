@@ -41,6 +41,41 @@ CLI configuration, so API outages do not interrupt node decisions. Automatic
 container-to-host-PID resolution and controller-to-agent policy delivery are
 extension points, not implemented features.
 
+## How the agent measures CPU delay
+
+```mermaid
+flowchart LR
+  E[EngineCore CPU threads] --> B[eBPF scheduler tracepoints]
+  B --> C[Runnable-wait counters]
+  C --> G[Go: five-second mean delay]
+  V[vLLM request metrics] --> O[Observation]
+  D[DCGM GPU metric] --> O
+  G --> O
+  O --> P[Policy decision]
+  P -->|Only with --enforce| W[Container cpu.weight]
+  X[Paired experiment script] -->|Manual 100 / 200 comparison| W
+```
+
+The agent puts the host EngineCore process ID in the eBPF `target` map. The
+[scheduler program](bpf/scheduler.bpf.c) filters on that process's TGID, so it
+measures all its Linux threads. A container can also have a separate API server
+process; that process is not included in this eBPF measurement. When a target
+thread becomes runnable, eBPF saves its timestamp by thread ID. When Linux next
+schedules it on a CPU, eBPF adds the elapsed wait to per-CPU counters. An exit
+event removes a thread's pending timestamp.
+
+Every five seconds, [Go telemetry](pkg/telemetry/scheduler_linux.go) subtracts
+the previous counters and computes `interval delay / interval samples / 1e9`.
+The result is mean seconds waited **per runnable event** across the EngineCore
+threads. It is not GPU time, total CPU usage, a per-thread report, or tail latency.
+The [agent loop](cmd/agent.go) combines that mean with vLLM latency/throughput
+and DCGM GPU utilization before asking the policy for a decision.
+
+eBPF only collects scheduling data. With `--enforce`, Go may change the target
+cgroup's `cpu.weight`; in the paired experiment, the Python runner changes it
+directly. That cgroup contains the whole vLLM container, so the weight applies
+to its API server and EngineCore processes, even though eBPF watches EngineCore.
+
 ## Linux node experiment
 
 Use an isolated cgroup v2 Linux 5.15+ GPU node with kernel BTF at
@@ -163,8 +198,19 @@ run the paired comparison from the repository root:
 python3 scripts/paired_experiment.py --pid HOST_ENGINE_PID \
   --model Qwen/Qwen3-0.6B --dry-run
 sudo python3 scripts/paired_experiment.py --pid HOST_ENGINE_PID \
-  --model Qwen/Qwen3-0.6B --pairs 5 --requests 200 --concurrency 1
+  --model Qwen/Qwen3-0.6B --pairs 5 --requests 200 --concurrency 1 \
+  --require-server-metrics
 ```
+
+For a server-side claim, add `--enable-per-request-metrics` to the existing
+vLLM launch command before starting the comparison. This requires restarting
+vLLM, then finding its new host engine PID and restarting the Granite agent.
+The [vLLM per-request metrics](https://docs.vllm.ai/en/v0.34.0/features/per_request_metrics/)
+include server-side time to first token in the final usage chunk. The benchmark
+requests that chunk. `--require-server-metrics` makes the warmup fail before CPU
+contention starts if the timing is absent. Keep the vLLM flag the same in both
+arms; it can add CPU overhead. This per-request TTFT measures scheduling to first
+output token; the client TTFT also includes request delivery and response streaming.
 
 The script requires a local `ubuntu:latest` image (`sudo docker pull ubuntu:latest`
 if missing). It warms up vLLM, starts four CPU loops in a separate Docker cgroup,
@@ -181,13 +227,14 @@ Results go into `experiment-results/<UTC timestamp>/`: `manifest.json` records
 the order and setup, each arm has `benchmark/requests.jsonl` with per-request
 first-content latency, total duration, returned token usage, and server-side
 TTFT when vLLM provides it, plus `benchmark/summary.json` and `agent.jsonl`.
-`comparison.json` reports paired p95 changes, p99, throughput, and the median
-p95 change. A positive p95 reduction means the boosted arm was faster. Verify
-that all requests completed, stress CPU stayed high, and the original weight
-was restored. This tests the CPU-weight intervention directly; the agent should stay
-in observation mode. Its automatic apply/rollback path is a separate test. The
-client here runs on the same four-core host as the CPU contender, so its own CPU
-wait can affect client-side TTFT; use a separate load-generator host before
+`comparison.json` reports paired client and server p95 changes, p99, throughput,
+and median p95 changes. A positive reduction means the boosted arm was faster.
+Verify that all requests completed, stress CPU stayed high, and the original
+weight was restored. This tests the CPU-weight intervention directly. The agent
+should stay in observation mode; its automatic apply/rollback path is a separate
+test. The client here runs on the same four-core host as the CPU contender, so
+its own CPU wait can affect client-side TTFT. Use a separate load-generator host
+before
 claiming a service-side latency benefit. Compare server-side TTFT when available.
 
 For Kubernetes, the following manual procedure uses the contention Job:
